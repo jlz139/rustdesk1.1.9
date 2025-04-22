@@ -1,0 +1,99 @@
+# 文件名: .github/workflows/build.yml
+name: 🚀 全平台构建工作流
+
+# 手动触发 + 定时触发 + 代码推送触发
+on:
+  workflow_dispatch:    # 手动触发
+    inputs:
+      build_mode:
+        description: '构建模式 (必选)'
+        required: true
+        type: choice
+        options:
+          - debug
+          - release
+      target_os:
+        description: '目标系统 (可空)'
+        required: false
+        type: string
+        default: 'all'
+  schedule:
+    - cron: '0 2 * * 1'  # 每周一凌晨2点自动构建
+  push:
+    branches:
+      - main
+
+jobs:
+  multi-platform-build:
+    name: 🛠️ 构建 ${{ matrix.platform }}
+    runs-on: ${{ 
+      contains(matrix.platform, 'win') && 'windows-latest' || 
+      contains(matrix.platform, 'mac') && 'macos-latest' || 
+      'ubuntu-latest' 
+    }}
+    
+    strategy:
+      matrix:
+        platform: 
+          - linux-x64
+          - win-x64
+          - mac-arm64
+        include:
+          - platform: linux-x64
+            os-type: linux
+          - platform: win-x64
+            os-type: windows
+          - platform: mac-arm64
+            os-type: macos
+
+    steps:
+    # ███ 初始化阶段 ███
+    - name: ⬇️ 检出代码
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # 获取完整提交历史
+        submodules: recursive
+
+    # ███ 安全配置 ███
+    - name: 🔑 SSH 密钥配置
+      if: matrix.os-type == 'linux'  # 仅限Linux
+      uses: webfactory/ssh-agent@v0.7.0
+      with:
+        ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+    # ███ 构建阶段 ███
+    - name: 🛠️ 初始化构建环境
+      shell: bash
+      run: |
+        # 动态构建参数处理
+        BUILD_FLAGS="-DCMAKE_BUILD_TYPE=${{ inputs.build_mode }}"
+        
+        case ${{ matrix.platform }} in
+          linux-x64)
+            sudo apt-get update && sudo apt-get install -y clang-16 llvm-16
+            ;;
+          win-x64)
+            choco install llvm --version=16.0.6 -y
+            ;;
+          mac-arm64)
+            brew install llvm@16
+            ;;
+        esac
+
+    - name: 🚧 执行编译
+      env:
+        BUILD_OUTPUT: "build-${{ matrix.platform }}"
+      run: |
+        cmake -B $BUILD_OUTPUT -S . $BUILD_FLAGS
+        cmake --build $BUILD_OUTPUT --parallel 4
+
+    # ███ 后处理阶段 ███
+    - name: 📦 产物打包
+      if: ${{ inputs.build_mode == 'release' }}
+      uses: actions/upload-artifact@v3
+      with:
+        name: ${{ matrix.platform }}-binaries
+        path: |
+          build-${{ matrix.platform }}/**/*.exe
+          build-${{ matrix.platform }}/**/*.so
+          build-${{ matrix.platform }}/**/*.d
