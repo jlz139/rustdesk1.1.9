@@ -1,5 +1,4 @@
-name: .NET Multi-platform Build
-
+name: Build & Publish
 on:
   workflow_dispatch:
     inputs:
@@ -10,67 +9,31 @@ on:
         type: choice
         options:
           - debug
-          release
+          - release
 
 jobs:
   build:
-    strategy:
+    name: Multi-Platform Build
+    runs-on: ${{ matrix.os || 'ubuntu-latest' }}
+    strategy:  # 正确缩进位置
       matrix:
         platform: [linux-x64, win-x64, mac-arm64]
-        include:  # 修复跨平台参数差异
-          - platform: win-x64
-            build_args: '/p:DefineConstants="WINDOWS"'
+        include:
           - platform: linux-x64
+            os: ubuntu-latest
             build_args: '-p:DefineConstants="LINUX"'
+          - platform: win-x64
+            os: windows-latest
+            build_args: '/p:DefineConstants="WINDOWS"'
           - platform: mac-arm64
+            os: macos-13
             build_args: '-p:DefineConstants="MAC"'
-
-    runs-on: ${{ 
-      matrix.platform == 'win-x64' && 'windows-latest' ||
-      matrix.platform == 'mac-arm64' && 'macos-13' || 
-      'ubuntu-latest' 
-    }}
 
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
         with:
-          fetch-depth: 0
+          dotnet-version: '8.0.x'
 
-      - name: 🧹 清理残留文件
-        run: rm -rf ./artifacts  # 防止旧构建产物干扰
-
-      - name: 🔍 深度路径扫描
-        id: find_proj
-        run: |
-          # 使用更精确的查找命令
-          PROJ_FILE=$(find "$GITHUB_WORKSPACE" -name '*.csproj' -not -path '*/bin/*' -not -path '*/obj/*' -print -quit)
-          echo "PROJ_PATH=${PROJ_FILE#$GITHUB_WORKSPACE/}" >> $GITHUB_ENV
-          echo "Found project: ${{ env.PROJ_PATH }}"
-
-      - name: ⚙️ 安装 .NET SDK
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: | 
-            8.0.x
-
-      - name: 🏗️ 跨平台编译
-        run: |
-          dotnet build "${{ env.PROJ_PATH }}" \
-            ${{ matrix.build_args }} \
-            --configuration ${{ inputs.build_mode }} \
-            --runtime ${{ matrix.platform }} \
-            --output ./artifacts/${{ matrix.platform }}
-        env:
-          DOTNET_CLI_TELEMETRY_OPTOUT: 1  # 禁用遥测
-
-      - name: 📦 智能打包
-        if: ${{ inputs.build_mode == 'release' }}
-        run: |
-          mkdir -p packaged
-          7z a -t7z packaged/${{ matrix.platform }}.7z ./artifacts/${{ matrix.platform }}/*
-
-      - name: 🚢 上传产物
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.platform }}-${{ github.run_id }}
-          path: ./packaged/${{ matrix.platform }}.7z
+      - name: Build Project
+        run: dotnet build ./src/YourApp/YourApp.csproj ${{ matrix.build_args }} --configuration ${{ inputs.build_mode }}
