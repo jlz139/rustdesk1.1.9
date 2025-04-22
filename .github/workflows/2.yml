@@ -1,5 +1,5 @@
 name: Build & Publish
-on: 
+on:
   workflow_dispatch:
     inputs:
       build_mode:
@@ -7,7 +7,7 @@ on:
         required: true
         default: 'debug'
         type: choice
-        options: 
+        options:
           - debug
           - release
 
@@ -15,13 +15,14 @@ jobs:
   build:
     name: Multi-Platform Build
     runs-on: ${{ matrix.os || 'ubuntu-latest' }}
+    # 修复点 1：添加矩阵策略
     strategy:
       matrix:
         platform: 
           - linux-x64
           - win-x64
           - mac-arm64
-        include:  # 关键修正：矩阵参数扩展（第27行所在区域）
+        include:
           - platform: linux-x64
             os: ubuntu-latest
             build_args: '-p:DefineConstants=LINUX'
@@ -41,8 +42,9 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
+      # 修复点 2：移除重复的 build 步骤
       - name: 🏗️ Build Project
-        run: dotnet build ${{ matrix.build_args }} --configuration ${{ inputs.build_mode }}
+        run: dotnet build ./src/YourApp/YourApp.csproj ${{ matrix.build_args }} --configuration ${{ inputs.build_mode }}
 
       - name: 📦 Pack Artifacts
         if: ${{ inputs.build_mode == 'release' }}
@@ -51,15 +53,15 @@ jobs:
           cp -r bin/* artifacts/${{ matrix.platform }}
 
       - name: ⬆️ Upload Artifacts (v4)
-        uses: actions/upload-artifact@v4  # 已升级到最新版
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.platform }}-${{ github.run_number }}
           path: |
             artifacts/${{ matrix.platform }}/
-            !artifacts/${{ matrix.platform }}/**/*.pdb  # 排除调试文件
+            !artifacts/${{ matrix.platform }}/**/*.pdb
           compression-level: 9
           retention-days: 7
-          if-no-files-found: error  # 无文件时报错
+          if-no-files-found: error
 
   deploy:
     needs: build
@@ -70,8 +72,14 @@ jobs:
         with:
           path: combined-artifacts
 
-      - name: 🚀 Deploy to Server
-        env:
-          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+      # 修复点 3：添加 SSH 配置步骤
+      - name: 🔐 Setup SSH
         run: |
-          scp -i $SSH_KEY -r combined-artifacts user@server:/deploy/path
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan server >> ~/.ssh/known_hosts
+
+      - name: 🚀 Deploy to Server
+        run: |
+          scp -r combined-artifacts user@server:/deploy/path
