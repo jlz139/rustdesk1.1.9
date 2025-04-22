@@ -1,6 +1,30 @@
+ 
  name: Build Execution
-  env:
-    LLVM_SYS_160_PREFIX: ${{ matrix.llvm_path }}
+on:
+  # 手动触发配置
+  workflow_dispatch:
+    inputs:
+      build-mode:
+        description: '选择构建模式'
+        required: true
+        type: choice
+        options:
+          - debug
+          - release
+        default: 'release'
+      clean-cache:
+        description: '清除构建缓存'
+        type: boolean
+        default: false
+
+  # 自动触发配置
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+ 
+
   run: |
     # Flutter 前置操作
     flutter precache --force
