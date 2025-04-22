@@ -1,4 +1,4 @@
-- name: Build Execution
+ name: Build Execution
   env:
     LLVM_SYS_160_PREFIX: ${{ matrix.llvm_path }}
   run: |
