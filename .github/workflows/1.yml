@@ -1,0 +1,78 @@
+name: Manual Build Workflow
+
+on:
+  workflow_dispatch:
+    inputs:
+      buildDate:
+        description: 'Date to use for build'
+        required: true
+        default: '2025-04-22'
+        type: string
+
+jobs:
+  build-for-windows:
+    name: Build Windows
+    runs-on: windows-2019
+
+    env:
+      BUILD_DATE: ${{ github.event.inputs.buildDate }}
+      LLVM_VERSION: 15.0.6
+      FLUTTER_VERSION: 3.7.0
+      TAG_NAME: nightly
+      VCPKG_COMMIT_ID: 14e7bb4ae24616ec54ff6b2f6ef4e8659434ea44
+      VERSION: 1.2.0
+      ANDROID_SIGNING_KEY: ${{ secrets.ANDROID_SIGNING_KEY }}
+      MACOS_P12_BASE64: ${{ secrets.MACOS_P12_BASE64 }}
+      RS_PUB_KEY: ${{ secrets.RS_PUB_KEY }}
+      RENDEZVOUS_SERVER: ${{ secrets.RENDEZVOUS_SERVER }}
+      LLVM_PATH: C:\Program Files\LLVM
+      LD_LIBRARY_PATH: C:\Program Files\LLVM\lib
+      DYLD_LIBRARY_PATH: C:\Program Files\LLVM\lib
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 1
+          sparse-checkout-cone-mode: true
+
+      - name: Set up LLVM and Clang
+        run: |
+          choco install -y llvm --version 15.0.6
+
+      - name: Install Flutter
+        run: |
+          choco install -y flutter --version 3.7.0
+          flutter doctor -v
+
+      - name: Install Rust and Cargo
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+          profile: minimal
+          target: x86_64-pc-windows-msvc
+
+      - name: Cache Flutter packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            C:\Users\runneradmin\AppData\Local\Pub\Cache
+          key: flutter-windows-stable-${{ env.FLUTTER_VERSION }}-${{ hashFiles('**/pubspec.yaml') }}
+          restore-keys: |
+            flutter-windows-stable-${{ env.FLUTTER_VERSION }}-
+
+      - name: Install dependencies
+        run: |
+          cargo install flutter_rust_bridge_codegen
+          flutter pub get
+
+      - name: Build RustDesk for Windows
+        run: |
+          cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Archive build artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: rustdesk-windows-${{ env.BUILD_DATE }}
+          path: target/release/rustdesk.exe
