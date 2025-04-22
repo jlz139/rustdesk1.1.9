@@ -1,13 +1,23 @@
-name: Manual Build Workflow
+name: Windows Build on Main
 
 on:
   workflow_dispatch:
-    inputs:
-      buildDate:
-        description: 'Date to use for build'
-        required: true
-        default: '2025-04-22'
-        type: string
+    branches: [main]  # 仅在 main 分支手动触发
+  push:
+    branches: [main]  # main 分支的代码推送触发
+
+jobs:
+  build-for-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout main branch
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Build RustDesk
+        run: |
+          cargo build --release --target x86_64-pc-windows-msvc
 
 jobs:
   build-for-windows:
