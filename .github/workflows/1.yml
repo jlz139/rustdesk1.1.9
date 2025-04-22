@@ -1,51 +1,130 @@
- 
- name: Build Execution
+name: Production Build Pipeline
+
 on:
-  # 手动触发配置
+  # 强制手动触发配置 ▼▼▼
   workflow_dispatch:
     inputs:
-      build-mode:
-        description: '选择构建模式'
+      release_level:
+        description: 'Release Level (必选)'
         required: true
         type: choice
         options:
           - debug
-          - release
-        default: 'release'
-      clean-cache:
-        description: '清除构建缓存'
+          - beta
+          - stable
+      platforms:
+        description: '目标平台 (逗号分隔)'
+        required: true
+        type: choice
+        options:
+          - win64
+          - macos
+          - linux
+          - all
+      force_rebuild:
+        description: '强制全新构建'
+        required: false
         type: boolean
         default: false
 
-  # 自动触发配置
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+env:
+  FLUTTER_VERSION: "3.13.9"
+  RUST_TOOLCHAIN: "stable"
 
- 
+jobs:
+  preflight-check:
+    name: 预检验证
+    runs-on: ubuntu-latest
+    outputs:
+      valid_platforms: ${{ steps.validate.outputs.valid_platforms }}
+    steps:
+      - name: 输入参数解析
+        id: validate
+        run: |
+          # 平台参数处理逻辑
+          case "${{ inputs.platforms }}" in
+            "all")
+              valid_platforms="win64,macos,linux"
+              ;;
+            *)
+              valid_platforms="${{ inputs.platforms }}"
+              ;;
+          esac
+          
+          # 输出验证结果
+          echo "valid_platforms=$valid_platforms" >> $GITHUB_OUTPUT
 
-  run: |
-    # Flutter 前置操作
-    flutter precache --force
-    dart pub global activate flutter_rust_bridge_codegen
+  build-executor:
+    name: 构建-${{ matrix.platform }}
+    needs: preflight-check
+    strategy:
+      matrix:
+        platform: ${{ fromJSON(needs.preflight-check.outputs.valid_platforms) }}
+    runs-on: 
+      - ${{ contains(matrix.platform, 'win64') && 'windows-2022' || '' }}
+      - ${{ contains(matrix.platform, 'macos') && 'macos-13' || '' }} 
+      - ${{ contains(matrix.platform, 'linux') && 'ubuntu-22.04' || '' }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
 
-    # 修复代码生成器路径引用
-    flutter_rust_bridge_codegen \
-      --rust-input lib/src/ffi.rs \
-      --dart-output lib/generated/bridge.dart \
-      --llvm-path "${{ matrix.llvm_path }}"
+      - name: 初始化构建环境
+        run: |
+          # Windows 专用配置
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            choco install -y llvm --version=16.0.6
+            choco install -y flutter --version=$FLUTTER_VERSION
+            echo "C:\Program Files\LLVM\bin" >> $GITHUB_PATH
+          
+          # macOS 专用配置  
+          elif [[ "${{ runner.os }}" == "macOS" ]]; then
+            brew install llvm@16
+            brew install flutter
+            echo "/usr/local/opt/llvm/bin" >> $GITHUB_PATH
+          
+          # Linux 专用配置
+          else
+            sudo apt-get install -y clang-16 lld-16
+            sudo snap install flutter --classic
+            echo "/usr/lib/llvm-16/bin" >> $GITHUB_PATH
+          fi
 
-    # 修复构建脚本执行方式（显式调用解释器）
-    case "${{ matrix.os }}" in
-      windows-2022)
-        pwsh -Command "./scripts/${{ matrix.build_script }}" `
-          --target "${{ matrix.rust_target }}" `
-          --release-type "${{ inputs.release_type }}"
-        ;;
-      *)
-        bash "./scripts/${{ matrix.build_script }}" \
-          --target "${{ matrix.rust_target }}" \
-          --release-type "${{ inputs.release_type }}"
-        ;;
-    esac
+      - name: 执行构建
+        env:
+          BUILD_MODE: ${{ inputs.release_level }}
+        run: |
+          flutter pub get
+          flutter build ${{ 
+            matrix.platform == 'win64' && 'windows' ||
+            matrix.platform == 'macos' && 'macos' ||
+            matrix.platform == 'linux' && 'linux'
+          }} --$BUILD_MODE
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}-${{ inputs.release_level }}
+          path: |
+            build/${{ 
+              matrix.platform == 'win64' && 'windows/**/*.exe' ||
+              matrix.platform == 'macos' && 'macos/**/*.app' || 
+              matrix.platform == 'linux' && 'linux/**/*.deb'
+            }}
+          retention-days: 7
+
+  post-build:
+    name: 构建完成
+    needs: [build-executor]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: 生成报告
+        run: |
+          echo "构建摘要:"
+          echo "触发时间: $(date)"
+          echo "执行结果: ${{ needs.build-executor.result }}"
+          echo "构建模式: ${{ inputs.release_level }}"
+          echo "目标平台: ${{ inputs.platforms }}"
