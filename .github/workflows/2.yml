@@ -1,39 +1,94 @@
-name: Build & Publish
+name: .NET Cross-Platform Build
+
 on:
   workflow_dispatch:
     inputs:
       build_mode:
-        description: 'Build mode'
+        description: 'Build configuration'
         required: true
         default: 'debug'
         type: choice
-        options:
+        options: 
           - debug
           - release
 
 jobs:
   build:
-    name: Multi-Platform Build
-    runs-on: ${{ matrix.os || 'ubuntu-latest' }}
-    strategy:  # 正确缩进位置
+    name: Build [${{ inputs.build_mode }}]
+    strategy:
       matrix:
         platform: [linux-x64, win-x64, mac-arm64]
         include:
           - platform: linux-x64
             os: ubuntu-latest
-            build_args: '-p:DefineConstants="LINUX"'
+            shell: bash
           - platform: win-x64
             os: windows-latest
-            build_args: '/p:DefineConstants="WINDOWS"'
+            shell: pwsh
           - platform: mac-arm64
             os: macos-13
-            build_args: '-p:DefineConstants="MAC"'
+            shell: bash
+
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - name: 🔍 Checkout Code
+        uses: actions/checkout@v4
         with:
-          dotnet-version: '8.0.x'
+          fetch-depth: 0
+          submodules: recursive  # 关键修复点：确保子模块检出
 
-      - name: Build Project
-        run: dotnet build ./src/YourApp/YourApp.csproj ${{ matrix.build_args }} --configuration ${{ inputs.build_mode }}
+      - name: 🧹 Clean Workspace
+        run: |
+          # 删除可能存在的残留文件
+          rm -rf ./bin ./obj 2>/dev/null || true
+
+      - name: 📂 Debug Directory Structure
+        run: |
+          echo "工作区路径: $GITHUB_WORKSPACE"
+          ls -lR  # 显示完整目录结构
+
+      - name: 🔎 Locate Project File
+        id: find_project
+        run: |
+          # 精确查找排除测试项目
+          PROJECT_FILE=$(find . -name '*.csproj' \
+            -not -path '*/test/*' \
+            -not -path '*/tests/*' \
+            -not -path '*/example/*' \
+            -print -quit)
+          
+          if [ -z "$PROJECT_FILE" ]; then
+            echo "::error::未找到任何.csproj项目文件!"
+            exit 1
+          fi
+
+          echo "发现项目文件: $PROJECT_FILE"
+          echo "PROJ_PATH=${PROJECT_FILE}" >> $GITHUB_ENV
+
+      - name: ⚙️ Setup .NET 9.0
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            9.0.x
+
+      - name: 🏗️ Build Project
+        run: |
+          dotnet build "${{ env.PROJ_PATH }}" \
+            --configuration ${{ inputs.build_mode }} \
+            --runtime ${{ matrix.platform }} \
+            --no-restore \
+            --output ./artifacts/${{ matrix.platform }}
+        env:
+          DOTNET_CLI_TELEMETRY_OPTOUT: 1  # 禁用遥测
+          DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 1
+
+      - name: 🚚 Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}-build
+          path: ./artifacts/${{ matrix.platform }}
+          if-no-files-found: error
