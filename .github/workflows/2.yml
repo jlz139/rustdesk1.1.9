@@ -14,36 +14,66 @@ on:
 
 jobs:
   build:
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          path: 'src'  # 显式指定检出路径
+    name: Build [${{ inputs.build_mode }}]
+    runs-on: ${{ matrix.os }}  # 关键修复点：添加必须的 runs-on 属性
+    strategy:
+      matrix:
+        platform: [linux-x64, win-x64, mac-arm64]
+        include:
+          - platform: linux-x64
+            os: ubuntu-latest
+            shell: bash
+          - platform: win-x64
+            os: windows-latest
+            shell: pwsh
+          - platform: mac-arm64
+            os: macos-13
+            shell: bash
 
-      - name: 🔍 智能项目查找
-        id: find_proj
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+
+    steps:
+      - name: 🔍 Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: 🧹 Clean Workspace
         run: |
-          # 使用绝对路径 + 深度搜索
-          WORKSPACE="$GITHUB_WORKSPACE/src"  # 匹配检出路径
-          
-          # 扩展搜索模式
-          PROJECT_FILE=$(find "$WORKSPACE" \
-            -iregex '.*\.csproj$' \
-            -not -ipath '*/test/*' \
-            -not -ipath '*/examples/*' \
+          rm -rf ./bin ./obj 2>/dev/null || true
+
+      - name: 📂 Debug Directory Structure
+        run: |
+          echo "Workspace Path: $GITHUB_WORKSPACE"
+          ls -lR
+
+      - name: 🔎 Locate Project File
+        id: find_project
+        run: |
+          PROJECT_FILE=$(find . -name '*.csproj' \
+            -not -path '*/test/*' \
+            -not -path '*/tests/*' \
+            -not -path '*/example/*' \
             -print -quit)
           
-          # 多级验证
-          if [[ ! -f "$PROJECT_FILE" ]]; then
-            echo "::error::Critical: No valid .csproj found in:"
-            find "$WORKSPACE" -name '*.*proj*' -exec echo '  --> {}' \;  # 调试输出
+          if [ -z "$PROJECT_FILE" ]; then
+            echo "::error::No .csproj file found!"
             exit 1
           fi
-          
-          echo "PROJ_PATH=${PROJECT_FILE#$WORKSPACE/}" >> $GITHUB_ENV
-          echo "Found project at: ${{ env.PROJ_PATH }}"
+          echo "PROJ_PATH=${PROJECT_FILE}" >> $GITHUB_ENV
 
-      - name: 🛠️ 动态构建
-        run: dotnet build "${{ env.PROJ_PATH }}" --output ./bin
-        env:
-          DOTNET_CLI_UI_LANGUAGE: en  # 强制英文输出
+      - name: ⚙️ Setup .NET 9.0
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            9.0.x
+
+      - name: 🏗️ Build Project
+        run: |
+          dotnet build "${{ env.PROJ_PATH }}" \
+            --configuration ${{ inputs.build_mode }} \
+            --runtime ${{ matrix.platform }} \
+            --output ./artifacts/${{ matrix.platform }}
