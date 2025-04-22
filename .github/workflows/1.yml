@@ -1,88 +1,174 @@
-name: Windows Build on Main
+name: Manual Full Build Pipeline
 
 on:
   workflow_dispatch:
-    branches: [main]  # 仅在 main 分支手动触发
-  push:
-    branches: [main]  # main 分支的代码推送触发
+    inputs:
+      build_date:
+        description: "Build Date (YYYY-MM-DD)"
+        required: true
+        default: "2025-04-22"
+        type: string
+      target_platform:
+        description: "Target Platform"
+        required: true
+        default: "windows"
+        type: choice
+        options:
+          - windows
+          - macos
+          - linux
 
 jobs:
-  build-for-windows:
-    runs-on: windows-latest
+  setup-environment:
+    name: Setup Global Environment
+    runs-on: ubuntu-latest
+    outputs:
+      build_id: ${{ steps.generate-id.outputs.build_id }}
     steps:
-      - name: Checkout main branch
+      - name: Generate Build ID
+        id: generate-id
+        run: echo "build_id=$(date +'%Y%m%d%H%M%S')-${{ github.run_id }}" >> $GITHUB_OUTPUT
+
+  build-target:
+    name: Build for ${{ inputs.target_platform }}
+    needs: setup-environment
+    runs-on: ${{ inputs.target_platform == 'windows' && 'windows-2022' || inputs.target_platform == 'macos' && 'macos-13' || 'ubuntu-22.04' }}
+    env:
+      BUILD_DATE: ${{ inputs.build_date }}
+      BUILD_ID: ${{ needs.setup-environment.outputs.build_id }}
+      TARGET_PLATFORM: ${{ inputs.target_platform }}
+
+    strategy:
+      matrix:
+        rust-target:
+          - x86_64-pc-windows-msvc
+          - x86_64-apple-darwin
+          - x86_64-unknown-linux-gnu
+
+    steps:
+      - name: Checkout Code
         uses: actions/checkout@v4
         with:
-          ref: main
+          submodules: recursive
+          fetch-depth: 0
 
-      - name: Build RustDesk
+      - name: Setup Platform Tools
+        shell: bash
         run: |
-          cargo build --release --target x86_64-pc-windows-msvc
+          case "${{ inputs.target_platform }}" in
+            windows)
+              choco install -y llvm --version=16.0.6
+              choco install -y flutter --version=3.13.9
+              ;;
+            macos)
+              brew install llvm@16 flutter
+              sudo xcode-select --switch /Applications/Xcode_15.1.app
+              ;;
+            linux)
+              sudo apt-get install -y clang-16 llvm-16-dev lld-16
+              snap install flutter --classic
+              ;;
+          esac
 
-jobs:
-  build-for-windows:
-    name: Build Windows
-    runs-on: windows-2019
-
-    env:
-      BUILD_DATE: ${{ github.event.inputs.buildDate }}
-      LLVM_VERSION: 15.0.6
-      FLUTTER_VERSION: 3.7.0
-      TAG_NAME: nightly
-      VCPKG_COMMIT_ID: 14e7bb4ae24616ec54ff6b2f6ef4e8659434ea44
-      VERSION: 1.2.0
-      ANDROID_SIGNING_KEY: ${{ secrets.ANDROID_SIGNING_KEY }}
-      MACOS_P12_BASE64: ${{ secrets.MACOS_P12_BASE64 }}
-      RS_PUB_KEY: ${{ secrets.RS_PUB_KEY }}
-      RENDEZVOUS_SERVER: ${{ secrets.RENDEZVOUS_SERVER }}
-      LLVM_PATH: C:\Program Files\LLVM
-      LD_LIBRARY_PATH: C:\Program Files\LLVM\lib
-      DYLD_LIBRARY_PATH: C:\Program Files\LLVM\lib
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-        with:
-          fetch-depth: 1
-          sparse-checkout-cone-mode: true
-
-      - name: Set up LLVM and Clang
-        run: |
-          choco install -y llvm --version 15.0.6
-
-      - name: Install Flutter
-        run: |
-          choco install -y flutter --version 3.7.0
-          flutter doctor -v
-
-      - name: Install Rust and Cargo
+      - name: Configure Rust Toolchain
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: stable
-          override: true
           profile: minimal
-          target: x86_64-pc-windows-msvc
+          toolchain: stable
+          targets: ${{ matrix.rust-target }}
+          override: true
 
-      - name: Cache Flutter packages
+      - name: Cache System Dependencies
         uses: actions/cache@v4
+        env:
+          cache-name: "sys-deps-${{ inputs.target_platform }}"
         with:
           path: |
-            C:\Users\runneradmin\AppData\Local\Pub\Cache
-          key: flutter-windows-stable-${{ env.FLUTTER_VERSION }}-${{ hashFiles('**/pubspec.yaml') }}
-          restore-keys: |
-            flutter-windows-stable-${{ env.FLUTTER_VERSION }}-
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.pub-cache
+            ${{ inputs.target_platform == 'windows' && 'C:\ProgramData\chocolatey\lib' || '/opt/homebrew' }}
+          key: ${{ runner.os }}-${{ env.cache-name }}-${{ hashFiles('&zwnj;**/Cargo.lock') }}-${{ hashFiles('**&zwnj;/pubspec.lock') }}
 
-      - name: Install dependencies
+      - name: Build Preparation
         run: |
-          cargo install flutter_rust_bridge_codegen
-          flutter pub get
+          flutter precache --force
+          dart pub global activate flutter_rust_bridge_codegen
+          cargo install cargo-bundle
 
-      - name: Build RustDesk for Windows
+      - name: Cross-Platform Build
+        shell: bash
         run: |
-          cargo build --release --target x86_64-pc-windows-msvc
+          export PATH="$PATH:$HOME/.pub-cache/bin"
+          
+          # Generate FFI bindings
+          flutter_rust_bridge_codegen \
+            --rust-input src/api.rs \
+            --dart-output lib/bridge_generated.dart \
+            --llvm-path "${{ inputs.target_platform == 'windows' && 'C:\\Program Files\\LLVM' || '/usr/local/opt/llvm' }}" 
 
-      - name: Archive build artifacts
-        uses: actions/upload-artifact@v3
+          # Platform-specific build commands
+          case "${{ inputs.target_platform }}" in
+            windows)
+              cargo build --release --target ${{ matrix.rust-target }} \
+                --features "hwcodec,flutter_embed"
+              ;;
+            macos)
+              cargo bundle --release --target ${{ matrix.rust-target }} \
+                --features "metal,core_video"
+              ;;
+            linux)
+              cargo deb --target ${{ matrix.rust-target }} \
+                --features "x11,wayland"
+              ;;
+          esac
+
+      - name: Post-Build Verification
+        run: |
+          # Validate binary signatures
+          case "${{ inputs.target_platform }}" in
+            windows)
+              signtool verify /pa target/${{ matrix.rust-target }}/release/*.exe
+              ;;
+            macos)
+              codesign -dv target/${{ matrix.rust-target }}/release/*.app
+              ;;
+            linux)
+              gpg --verify *.deb
+              ;;
+          esac
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
         with:
-          name: rustdesk-windows-${{ env.BUILD_DATE }}
-          path: target/release/rustdesk.exe
+          name: ${{ inputs.target_platform }}-build-${{ env.BUILD_ID }}
+          path: |
+            target/${{ matrix.rust-target }}/release/
+            **/*.bundle
+            **/*.deb
+          retention-days: 7
+
+  notify-completion:
+    name: Send Notification
+    needs: [build-target]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Slack Notification
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "Build ${{ needs.setup-environment.outputs.build_id }} (${{ inputs.target_platform }}) completed",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "🗳️ *Build Report* \n*Status*: ${{ job.status }} \n*Platform*: ${{ inputs.target_platform }} \n*Artifact*: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
